@@ -127,6 +127,10 @@ For the agent/triggering loop: point alerts (including anomaly detection) at a *
 
 What migrates: the entire log pipeline. What doesn't: dashboards, alert rules, and retained history — recreate alerts on the new backend and let history age out of Better Stack.
 
+## Support Agent (planned)
+
+Each node will run the [Nix-Support-Agent](https://github.com/SEBK4C/Nix-Support-Agent) — a static-binary AI agent (no Node.js) that handles incidents (Better Stack alert → webhook → diagnose → fix or escalate) and operator requests via a **GitHub bridge**: open an issue here labeled `node/<hostname>` (e.g. "install ROCm on node07") and the node's agent responds with a diagnosis and a PR. Per-node changes land in `hosts/<node>/extra.nix`, which the flake auto-imports when present — so host-specific software (AI accelerators, one-off services) never touches the shared modules. The agent's full specification lives in that repo's `prompt.md`; once it ships, it becomes a flake input here plus one `services.nix-support-agent.enable` line.
+
 ## How it fits together
 
 ```

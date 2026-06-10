@@ -10,7 +10,11 @@
       mkNode = name: role:
         lib.nixosSystem {
           system = "x86_64-linux";
-          modules = [
+          # hosts/<name>/extra.nix is the per-node escape hatch: host-specific
+          # software (GPU/accelerator drivers, one-off services) lands there —
+          # typically via a Nix-Support-Agent PR — without touching shared modules.
+          modules = lib.optional (builtins.pathExists (./hosts + "/${name}/extra.nix"))
+            (./hosts + "/${name}/extra.nix") ++ [
             ./cluster-settings.nix
             ./modules/cluster.nix
             ./modules/common.nix
