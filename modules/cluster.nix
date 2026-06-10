@@ -56,5 +56,15 @@
       default = "node01";
       description = "Tailnet address nodes use to join the Swarm.";
     };
+
+    logging.endpoint = lib.mkOption {
+      type = lib.types.str;
+      default = "";
+      description = ''
+        HTTP(S) ingest endpoint logs are shipped to (Better Stack by
+        default; any Vector-compatible backend works). Empty disables
+        log shipping entirely.
+      '';
+    };
   };
 }

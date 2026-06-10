@@ -19,6 +19,7 @@
             ./modules/ceph.nix
             ./modules/swarm.nix
             ./modules/portainer.nix
+            ./modules/logging.nix
             (./hosts + "/${name}/hardware-configuration.nix")
             {
               networking.hostName = name;

@@ -24,6 +24,7 @@ This repo is **public and secret-free**. Every secret is fetched at runtime from
 | `Ceph` | `credential` | The CephFS client secret key (base64 string, not the full keyring) |
 | `Swarm` | `manager-token` | Filled in at step 6, after the first manager is up |
 | `Swarm` | `worker-token` | Filled in at step 6, after the first manager is up |
+| `BetterStack` | `credential` | Source token for log shipping (optional — see [Logging](#logging)) |
 
 ### 2. Fork this repo and set your cluster settings
 
@@ -103,6 +104,28 @@ docker node ls                                 # (managers) node Ready, right ro
 ```
 
 In Portainer, confirm the node shows CPU/RAM/tasks. Full acceptance criteria: prompt.md §8.
+
+## Logging
+
+**Why Better Stack:** ease of setup — hosted OpenTelemetry-native logs with built-in alerting, webhooks, and an MCP server that AI agents can query directly, for zero ops today.
+
+Every node runs [Vector](https://vector.dev) shipping the full systemd journal (Docker containers log to the journal too, so Swarm workloads are included) to the endpoint in `cluster-settings.nix`. Shipping happens over the public internet to Better Stack's ingest — node-to-node traffic stays on the tailnet as before.
+
+To enable:
+
+1. In Better Stack, create a **Source** (platform: Vector / HTTP). Copy its token and ingest URL.
+2. Store the token in 1Password: vault `Infrastructure`, item `BetterStack`, field `credential`.
+3. Set `logging.endpoint` in `cluster-settings.nix` to the ingest URL, commit, rebuild nodes.
+
+For the agent/triggering loop: point alerts (including anomaly detection) at a **webhook** to wake your automation, and connect agents to the [Better Stack MCP server](https://betterstack.com/docs/getting-started/integrations/mcp/) to query logs with SQL, check incidents, and acknowledge them.
+
+**Migration path if we outgrow them:** Vector is the vendor-neutral layer, so the nodes never need re-plumbing. To move to self-hosted [Loki](https://grafana.com/oss/loki/) or [ClickStack](https://clickhouse.com/clickstack) (the open-source equivalent of Better Stack's architecture) — or any other platform Vector/OTLP can speak to:
+
+1. Stand up the new backend on the tailnet (or anywhere).
+2. Change `logging.endpoint` (and, if the backend isn't HTTP-bearer, the sink type in `modules/logging.nix` — e.g. `type = "loki"`).
+3. Swap the 1Password `BetterStack` credential for the new backend's token, rebuild.
+
+What migrates: the entire log pipeline. What doesn't: dashboards, alert rules, and retained history — recreate alerts on the new backend and let history age out of Better Stack.
 
 ## How it fits together
 
