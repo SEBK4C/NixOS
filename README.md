@@ -10,6 +10,10 @@ Point a NixOS machine at this flake and it sets itself up automatically:
 
 This repo is **public and secret-free**. Every secret is fetched at runtime from 1Password via `op://Infrastructure/...` references. Never commit a key, keyring, or token. The full design is in [prompt.md](prompt.md).
 
+## Public / private split
+
+This repo is the **framework**: shared modules, specs, and example host layout — generic and safe to publish. Everything operational lives in a **private ops repo** ([SEBK4C/NixOS-Ops](https://github.com/SEBK4C/NixOS-Ops)) that imports this flake's `nixosModules.cluster` and adds the real inventory: actual `cluster-settings.nix` values, per-node hardware configs and `extra.nix`, workload stacks, and the support-agent issue bridge (incident diagnostics never go public). **Nodes build from the ops repo**, authenticated with a read-only GitHub token from 1Password. Follow the steps below for the one-time bootstrap; the build commands in step 5 come from the ops repo's README.
+
 ## Setup Steps
 
 ### 1. Create the 1Password service account and vault items
@@ -25,15 +29,16 @@ This repo is **public and secret-free**. Every secret is fetched at runtime from
 | `Swarm` | `manager-token` | Filled in at step 6, after the first manager is up |
 | `Swarm` | `worker-token` | Filled in at step 6, after the first manager is up |
 | `BetterStack` | `credential` | Source token for log shipping (optional — see [Logging](#logging)) |
+| `GitHub` | `credential` | Fine-grained PAT, **read-only** (Contents:Read on the private ops repo) — used by `cluster-rebuild` |
 
-### 2. Fork this repo and set your cluster settings
+### 2. Set your cluster settings (in the private ops repo)
 
-Edit [`cluster-settings.nix`](cluster-settings.nix) — it's the only file you need to touch:
+Edit `cluster-settings.nix` **in the ops repo** — it's the only file you need to touch:
 
 - `adminSSHKeys` — your SSH public key, so you can log in as root.
 - `ceph.monHosts` — your Ceph monitor addresses, or leave empty to skip Ceph for now.
 
-Commit and push.
+Commit and push. (Forking this framework standalone? The template `cluster-settings.nix` here works the same way.)
 
 ### 3. Install NixOS and capture the hardware config
 
@@ -43,7 +48,7 @@ Install minimal NixOS on the node as usual. Then on the node:
 nixos-generate-config --show-hardware-config > hardware-configuration.nix
 ```
 
-Copy that file into this repo at `hosts/node01/hardware-configuration.nix` (matching the node's name), commit, push. Repeat per node — this is the only per-node file.
+Copy that file into the **ops repo** at `hosts/node01/hardware-configuration.nix` (matching the node's name), commit, push. Repeat per node — this is the only per-node file.
 
 ### 4. Place the 1Password token on the node
 
@@ -59,14 +64,17 @@ chmod 600 /etc/op/token
 
 ### 5. Build the node
 
-On the node, as root:
+On the node, as root (first build needs the read-only GitHub token inline, since `op` isn't set up yet):
 
 ```sh
-export NIX_CONFIG="experimental-features = nix-command flakes"
-nixos-rebuild switch --flake github:YOUR_GITHUB_USER/NixOS#node01
+export NIX_CONFIG="experimental-features = nix-command flakes
+access-tokens = github.com=github_pat_YOUR_READONLY_TOKEN"
+nixos-rebuild switch --flake github:SEBK4C/NixOS-Ops#node01
 ```
 
 Use the matching host name (`#node02`, `#node03`, …) on each node. On boot/switch the node validates 1Password, joins the tailnet, mounts Ceph, and joins the swarm — automatically.
+
+Every rebuild after the first is just `cluster-rebuild` (or `cluster-rebuild test`) — the helper pulls the GitHub token from 1Password per invocation, so no token is ever stored on the node.
 
 ### 6. First manager only: store the swarm join tokens
 
@@ -129,7 +137,7 @@ What migrates: the entire log pipeline. What doesn't: dashboards, alert rules, a
 
 ## Support Agent (planned)
 
-Each node will run the [Nix-Support-Agent](https://github.com/SEBK4C/Nix-Support-Agent) — a static-binary AI agent (no Node.js) that handles incidents (Better Stack alert → webhook → diagnose → fix or escalate) and operator requests via a **GitHub bridge**: open an issue here labeled `node/<hostname>` (e.g. "install ROCm on node07") and the node's agent responds with a diagnosis and a PR. Per-node changes land in `hosts/<node>/extra.nix`, which the flake auto-imports when present — so host-specific software (AI accelerators, one-off services) never touches the shared modules. The agent's full specification lives in that repo's `prompt.md`; once it ships, it becomes a flake input here plus one `services.nix-support-agent.enable` line.
+Each node will run the [Nix-Support-Agent](https://github.com/SEBK4C/Nix-Support-Agent) — a static-binary AI agent (no Node.js) that handles incidents (Better Stack alert → webhook → diagnose → fix or escalate) and operator requests via a **GitHub bridge on the private ops repo**: open an issue there labeled `node/<hostname>` (e.g. "install ROCm on node07") and the node's agent responds with a diagnosis and a PR. The bridge is private so diagnostics and journal excerpts never reach the public internet, and agents only act on owner-authored issues. Per-node changes land in the ops repo's `hosts/<node>/extra.nix`, auto-imported by its flake — host-specific software never touches the shared modules here. The agent's full specification lives in its repo's `prompt.md`; once it ships, it becomes a flake input plus one `services.nix-support-agent.enable` line.
 
 ## How it fits together
 

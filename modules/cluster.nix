@@ -57,6 +57,16 @@
       description = "Tailnet address nodes use to join the Swarm.";
     };
 
+    opsFlake = lib.mkOption {
+      type = lib.types.str;
+      default = "";
+      description = ''
+        Flake ref of the (private) ops/inventory repo nodes rebuild from,
+        e.g. "github:OWNER/NixOS-Ops". Enables the cluster-rebuild helper,
+        which injects a read-only GitHub token from 1Password at run time.
+      '';
+    };
+
     logging.endpoint = lib.mkOption {
       type = lib.types.str;
       default = "";
