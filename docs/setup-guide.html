@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>NixOS Swarm Cluster — Setup Guide</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Helvetica Neue", Arial, sans-serif;
+    font-size: 10.5pt; line-height: 1.55; color: #1a202c;
+    max-width: 175mm; margin: 0 auto;
+  }
+  h1 { font-size: 24pt; margin: 0 0 4px; letter-spacing: -0.5px; }
+  h2 { font-size: 15pt; margin-top: 28px; padding-bottom: 4px;
+       border-bottom: 2px solid #2b6cb0; color: #2b6cb0; page-break-after: avoid; }
+  h3 { font-size: 12pt; margin-top: 18px; page-break-after: avoid; }
+  .subtitle { color: #4a5568; font-size: 12pt; margin-bottom: 2px; }
+  .meta { color: #718096; font-size: 9pt; margin-bottom: 24px; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 9.5pt; page-break-inside: avoid; }
+  th { background: #2b6cb0; color: #fff; text-align: left; padding: 6px 8px; }
+  td { border: 1px solid #cbd5e0; padding: 5px 8px; vertical-align: top; }
+  tr:nth-child(even) td { background: #f7fafc; }
+  code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 9pt;
+         background: #edf2f7; padding: 1px 4px; border-radius: 3px; }
+  pre { background: #1a202c; color: #e2e8f0; padding: 10px 12px; border-radius: 6px;
+        font-size: 9pt; line-height: 1.45; overflow-x: hidden; white-space: pre-wrap;
+        page-break-inside: avoid; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .box { border: 1px solid #cbd5e0; border-left: 4px solid #2b6cb0; background: #ebf8ff;
+         padding: 8px 12px; margin: 12px 0; border-radius: 0 6px 6px 0; page-break-inside: avoid; }
+  .warn { border-left-color: #c53030; background: #fff5f5; }
+  .box b:first-child { display: block; margin-bottom: 2px; }
+  .pagebreak { page-break-before: always; }
+  ol.steps > li { margin-bottom: 6px; }
+  ul li { margin-bottom: 3px; }
+  .check li { list-style: none; }
+  .check li::before { content: "☐  "; }
+  .diagram { font-family: "SF Mono", Menlo, monospace; font-size: 8.5pt; line-height: 1.3;
+             background: #f7fafc; border: 1px solid #cbd5e0; border-radius: 6px;
+             padding: 10px 14px; white-space: pre; page-break-inside: avoid; }
+  a { color: #2b6cb0; }
+  .toc { columns: 2; font-size: 9.5pt; }
+  .toc div { margin-bottom: 3px; }
+</style>
+</head>
+<body>
+
+<h1>NixOS Swarm Cluster</h1>
+<div class="subtitle">Setup Guide — self-bootstrapping nodes with 1Password, Tailscale, Ceph, Docker Swarm &amp; Portainer</div>
+<div class="meta">Version 1.0 · June 2026 · Companion to <b>github.com/SEBK4C/NixOS</b> · Written for junior DevOps engineers — no NixOS experience assumed</div>
+
+<h2>Contents</h2>
+<div class="toc">
+<div>1. What you're building</div>
+<div>2. Accounts &amp; URLs you need</div>
+<div>3. Step 1 — Set up 1Password (vaults, items, service account)</div>
+<div>4. Step 2 — Set up Tailscale</div>
+<div>5. Step 3 — Set up the Git repositories</div>
+<div>6. Step 4 — Bring up the first node</div>
+<div>7. Step 5 — Store Swarm tokens, bring up remaining nodes</div>
+<div>8. Step 6 — Deploy Portainer</div>
+<div>9. Step 7 — Ship logs to Better Stack</div>
+<div>10. Step 8 — Validate every node</div>
+<div>11. Day-2 operations</div>
+<div>12. Scaling to Dev / Staging / Production</div>
+<div>13. Troubleshooting</div>
+<div>14. Appendix A — Complete credential inventory</div>
+</div>
+
+<h2>1. What you're building</h2>
+<p>A private cluster of ten NixOS machines that <b>configure themselves</b>. You point a fresh machine at a Git repository, give it one secret (a 1Password token), and it does the rest: fetches its credentials, joins your private network, mounts shared storage, joins the container cluster, and reports in to a management UI.</p>
+
+<div class="diagram">  YOU (admin workstation, on the tailnet)
+   │  git push config        ▲ manage via browser
+   ▼                         │
+  GitHub ──────────────► Portainer UI (https://node01:9443)
+   │  nixos-rebuild                ▲
+   ▼                               │ agent on every node
+ ┌──────────────────────────────────────────────────────────┐
+ │  node01 ─ node03: Swarm managers    node04 ─ node10: workers
+ │  every node: Tailscale ▪ Docker ▪ Ceph client ▪ Vector   │
+ │  private mesh network (Tailscale WireGuard, 100.x.y.z)   │
+ └──────────────────────────────────────────────────────────┘
+   │ fetch secrets at boot          │ ship logs
+   ▼                                ▼
+  1Password (op://Infrastructure/…)   Better Stack (alerts → webhooks)</div>
+
+<h3>The three rules that make this safe</h3>
+<ol class="steps">
+<li><b>Git is the source of truth, and it holds zero secrets.</b> The public repo is the framework anyone can reuse; your private <i>ops</i> repo holds your real inventory. Neither ever contains a password, key, or token.</li>
+<li><b>One secret per machine.</b> The only credential you ever place on a node by hand is a 1Password <i>service account token</i>. Everything else (Tailscale keys, Ceph keys, Swarm tokens, logging tokens) is fetched from 1Password at boot, by reference.</li>
+<li><b>Nothing listens on the public internet.</b> All management traffic flows over the Tailscale mesh. The firewall trusts only the tailnet interface.</li>
+</ol>
+
+<h2>2. Accounts &amp; URLs you need</h2>
+<table>
+<tr><th>Service</th><th>Used for</th><th>Sign up / console URL</th><th>Cost</th></tr>
+<tr><td>1Password</td><td>All cluster secrets, fetched at runtime</td><td>1password.com — service accounts at <b>my.1password.com → Developer</b></td><td>Personal/Family plan works; service accounts included</td></tr>
+<tr><td>Tailscale</td><td>Private WireGuard mesh between nodes</td><td>login.tailscale.com — keys at <b>/admin/settings/keys</b></td><td>Free tier covers up to 100 devices</td></tr>
+<tr><td>GitHub</td><td>Public framework repo + private ops repo</td><td>github.com — PATs at <b>github.com/settings/personal-access-tokens/new</b></td><td>Free (private repos included)</td></tr>
+<tr><td>Better Stack</td><td>Log aggregation, alerting, webhooks</td><td>betterstack.com — sources at <b>telemetry.betterstack.com</b></td><td>Free tier: 3 GB logs/month</td></tr>
+<tr><td>Anthropic <i>or</i> OpenAI</td><td>API key for the (planned) support agent</td><td>console.anthropic.com/settings/keys · platform.openai.com/api-keys</td><td>Pay per use; optional until the agent ships</td></tr>
+<tr><td>Ceph cluster</td><td>Shared persistent storage (optional at start)</td><td>docs.ceph.com — yours to host; the cluster only needs client access</td><td>Self-hosted</td></tr>
+</table>
+<p>Hardware: 10 x86_64 machines (VMs or bare metal) with NixOS minimal installed — installer at <b>nixos.org/download</b>. The node count is configurable in the flake; three managers is the minimum for a fault-tolerant Swarm.</p>
+
+<div class="pagebreak"></div>
+<h2>3. Step 1 — Set up 1Password</h2>
+
+<h3>3.1 Create the vaults</h3>
+<p>Create <b>two vaults</b> (1Password app → New Vault):</p>
+<table>
+<tr><th>Vault</th><th>Purpose</th><th>Who can read it</th></tr>
+<tr><td><b>Infrastructure</b></td><td>Runtime secrets the nodes fetch at boot. Item names below are read by the code <i>exactly as written</i> — no spaces, match the capitalization.</td><td>You + the cluster's service account (read-only)</td></tr>
+<tr><td><b>Admin</b></td><td>Master copies and break-glass credentials: the service-account token itself, account logins, recovery codes. <b>Never grant any service account access to this vault.</b></td><td>You only</td></tr>
+</table>
+<div class="box"><b>Why two vaults?</b> If a node is ever compromised, the attacker gets the node's service-account token — which can read <i>only</i> the Infrastructure vault. Your account logins, recovery codes, and the token master copies stay out of reach, and you revoke one service account to lock everything down.</div>
+
+<h3>3.2 Create the Infrastructure vault items</h3>
+<p>Create each item as type <i>API Credential</i> (or <i>Secure Note</i> for Environment). Field names matter — the nodes read <code>op://Infrastructure/&lt;Item&gt;/&lt;field&gt;</code> literally.</p>
+<table>
+<tr><th>Item name</th><th>Field</th><th>What goes in it</th><th>Where you get it</th><th>When</th></tr>
+<tr><td><b>Tailscale</b></td><td><code>credential</code></td><td>Auth key (<code>tskey-auth-…</code>) — set <i>Reusable</i> + <i>Pre-approved</i>, 90-day expiry</td><td>login.tailscale.com/admin/settings/keys → Generate auth key</td><td>Before first node</td></tr>
+<tr><td><b>Ceph</b></td><td><code>credential</code></td><td>CephFS client secret key (base64 string only, not the full keyring)</td><td>On your Ceph cluster: <code>ceph auth get-key client.swarm</code></td><td>When enabling storage (optional)</td></tr>
+<tr><td><b>Swarm</b></td><td><code>manager-token</code></td><td><code>SWMTKN-…</code> manager join token</td><td>node01's journal after first boot (Step 5)</td><td>After node01 is up</td></tr>
+<tr><td><b>Swarm</b></td><td><code>worker-token</code></td><td><code>SWMTKN-…</code> worker join token</td><td>Same place</td><td>After node01 is up</td></tr>
+<tr><td><b>BetterStack</b></td><td><code>credential</code></td><td>Telemetry source token</td><td>telemetry.betterstack.com → Sources → Connect source (platform: Vector/HTTP)</td><td>When enabling logging</td></tr>
+<tr><td><b>GitHub</b></td><td><code>credential</code></td><td>Fine-grained PAT, <b>read-only</b>: <i>Contents: Read</i> on your private ops repo only</td><td>github.com/settings/personal-access-tokens/new</td><td>Before first node</td></tr>
+<tr><td><b>SupportAgent</b></td><td><code>github-token</code></td><td>Fine-grained PAT, read-write: <i>Contents + Issues + Pull requests</i> on the ops repo; <i>Contents + Pull requests</i> on the framework repo</td><td>Same URL</td><td>When the agent ships</td></tr>
+<tr><td><b>SupportAgent</b></td><td><code>llm-api-key</code></td><td>Anthropic or OpenAI API key</td><td>console.anthropic.com/settings/keys or platform.openai.com/api-keys</td><td>When the agent ships</td></tr>
+<tr><td><b>SupportAgent</b></td><td><code>webhook-secret</code></td><td>Random string you generate: <code>openssl rand -hex 32</code></td><td>Your terminal</td><td>When the agent ships</td></tr>
+<tr><td><b>SupportAgent</b></td><td><code>betterstack-api-token</code></td><td>Better Stack API token (for the agent's log queries)</td><td>Better Stack → settings → API tokens</td><td>When the agent ships</td></tr>
+<tr><td><b>Environment</b></td><td><code>notes</code></td><td>Non-secret, host-specific config overrides (free text)</td><td>You write it</td><td>Optional</td></tr>
+</table>
+
+<h3>3.3 Create the service account</h3>
+<ol class="steps">
+<li>Go to <b>my.1password.com → Developer → Service Accounts → Create</b> (docs: developer.1password.com/docs/service-accounts).</li>
+<li>Name it after the environment, e.g. <code>nixos-cluster-prod</code>.</li>
+<li>Grant <b>Read</b> access to the <b>Infrastructure</b> vault. Nothing else. Not the Admin vault.</li>
+<li>The token (<code>ops_…</code>) is shown <b>once</b>. Immediately save it in the <b>Admin</b> vault as item <b>Service Account Token — Production</b>.</li>
+</ol>
+
+<h3>3.4 Create the Admin vault items</h3>
+<table>
+<tr><th>Item name</th><th>Contents</th></tr>
+<tr><td><b>Service Account Token — Production</b></td><td>The <code>ops_…</code> token from 3.3 (master copy; you'll paste it onto each node once)</td></tr>
+<tr><td><b>Tailscale Admin</b></td><td>Your Tailscale login method, tailnet name</td></tr>
+<tr><td><b>GitHub Account</b></td><td>Login, 2FA recovery codes (enable passkeys/2FA!)</td></tr>
+<tr><td><b>Better Stack Login</b></td><td>Login credentials</td></tr>
+<tr><td><b>Portainer Admin</b></td><td>The admin password you'll create at first Portainer login (Step 6)</td></tr>
+<tr><td><b>LLM Provider</b></td><td>Anthropic/OpenAI account login (the API key's master home)</td></tr>
+</table>
+
+<div class="pagebreak"></div>
+<h2>4. Step 2 — Set up Tailscale</h2>
+<ol class="steps">
+<li>Create a tailnet at <b>login.tailscale.com</b> and install Tailscale on your admin workstation (your laptop must be on the tailnet to manage the cluster).</li>
+<li>Check <b>DNS → MagicDNS</b> is enabled (it is by default) — nodes find each other by hostname (<code>node01</code>) instead of IP.</li>
+<li>Generate the auth key (<b>Settings → Keys → Generate auth key</b>): <i>Reusable</i> ✓, <i>Pre-approved</i> ✓ (so nodes don't wait for manual device approval), expiry 90 days.</li>
+<li>Store it in 1Password: <b>Infrastructure → Tailscale → credential</b>.</li>
+</ol>
+<div class="box"><b>Key expiry tip.</b> The auth key only matters when a node <i>joins</i>. Existing nodes stay connected after it expires — you only need a fresh key (same 1Password item, updated) when adding or rebuilding nodes.</div>
+
+<h2>5. Step 3 — Set up the Git repositories</h2>
+<p>Two repositories, deliberately split:</p>
+<table>
+<tr><th>Repo</th><th>Visibility</th><th>Contains</th></tr>
+<tr><td><b>NixOS</b> (the framework — fork <code>github.com/SEBK4C/NixOS</code>)</td><td>Public</td><td>Shared modules, specs, this guide. Generic and secret-free; safe to publish, easy to share.</td></tr>
+<tr><td><b>NixOS-Ops</b> (your inventory — copy the layout from the framework's README)</td><td><b>Private</b></td><td>Your real settings, per-node hardware configs, host-specific software, workload stacks, and the support-agent issue trail. Private because <i>operational</i> data (logs, addresses, incident details) shouldn't be public, even though it also contains no secrets.</td></tr>
+</table>
+<ol class="steps">
+<li>Fork the framework repo (or use it directly if you're me).</li>
+<li>Create your private ops repo with: <code>flake.nix</code> (composes the framework's <code>nixosModules.cluster</code>), <code>cluster-settings.nix</code>, and a <code>hosts/nodeXX/</code> directory per node — see <code>github.com/SEBK4C/NixOS-Ops</code> layout in the framework README.</li>
+<li>Edit <code>cluster-settings.nix</code> in the ops repo: your SSH public key in <code>adminSSHKeys</code>, Ceph monitor addresses (or leave empty to skip Ceph), <code>opsFlake</code> pointing at your ops repo.</li>
+<li>Create the <b>read-only</b> GitHub PAT (Section 3.2, item <b>GitHub</b>) — nodes use it to fetch the private repo. Use a fine-grained token scoped to <i>only</i> the ops repo with <i>Contents: Read</i>.</li>
+<li>On GitHub, enable <b>passkeys/2FA</b> and <b>branch protection</b> on <code>main</code> of both repos. Whoever controls these repos controls your machines.</li>
+</ol>
+
+<h2>6. Step 4 — Bring up the first node</h2>
+<ol class="steps">
+<li><b>Install NixOS minimal</b> on the machine (nixos.org/download → minimal ISO). Any standard install works; give it disk and network.</li>
+<li><b>Capture the hardware config</b> — on the node:
+<pre><code>nixos-generate-config --show-hardware-config &gt; hardware-configuration.nix</code></pre>
+Copy this file into your <b>ops repo</b> at <code>hosts/node01/hardware-configuration.nix</code>, commit, push. (This is the only per-node file; repeat for each node.)</li>
+<li><b>Place the one manual secret</b> — on the node, as root:
+<pre><code>mkdir -p /etc/op
+echo 'ops_YOUR_SERVICE_ACCOUNT_TOKEN' &gt; /etc/op/token
+chmod 600 /etc/op/token</code></pre></li>
+<li><b>Build</b> — the first build needs the GitHub token inline (1Password isn't wired up yet):
+<pre><code>export NIX_CONFIG="experimental-features = nix-command flakes
+access-tokens = github.com=github_pat_YOUR_READONLY_TOKEN"
+nixos-rebuild switch --flake github:YOUR_USER/NixOS-Ops#node01</code></pre></li>
+<li>Watch it bootstrap: validates 1Password → joins the tailnet → (mounts Ceph) → initializes the Swarm. Check progress with <code>journalctl -u op-bootstrap -u tailscale-join -u swarm-join -f</code>.</li>
+</ol>
+<div class="box"><b>From now on, rebuilds are one command.</b> Every node gets a <code>cluster-rebuild</code> helper that fetches the GitHub token from 1Password per run — nothing stored on disk. <code>cluster-rebuild</code> (apply), <code>cluster-rebuild test</code> (try without persisting), <code>cluster-rebuild boot</code> (apply at next reboot).</div>
+
+<h2>7. Step 5 — Swarm tokens, remaining nodes</h2>
+<ol class="steps">
+<li>node01 initialized the Swarm on first boot and printed join tokens. Read them:
+<pre><code>journalctl -u swarm-join | grep -A2 'join-token'</code></pre></li>
+<li>Store both <code>SWMTKN-…</code> values in 1Password: <b>Infrastructure → Swarm → manager-token / worker-token</b>.</li>
+<li>Repeat Step 4 (install → hardware config → token file → build) for node02…node10, using the matching name (<code>#node02</code> etc.). Each node reads the right token for its role and joins by itself. Verify on any manager: <code>docker node ls</code> — all nodes <i>Ready</i>, 01–03 as managers.</li>
+</ol>
+
+<h2>8. Step 6 — Deploy Portainer</h2>
+<ol class="steps">
+<li>On node01: <code>cluster-deploy-portainer</code> (deploys the Portainer server + an agent on every node, as Swarm services).</li>
+<li>From your workstation (on the tailnet), open <b>https://node01:9443</b>, create the admin account, and save the password in the <b>Admin</b> vault (item <b>Portainer Admin</b>).</li>
+<li>You should see all ten nodes with CPU/RAM/containers. Portainer is your window, not your source of truth — durable changes still go through Git.</li>
+</ol>
+
+<h2>9. Step 7 — Ship logs to Better Stack</h2>
+<ol class="steps">
+<li>In <b>telemetry.betterstack.com → Sources → Connect source</b>, create a source (platform: <i>Vector</i> or <i>HTTP</i>). Copy its <b>token</b> and <b>ingest URL</b>.</li>
+<li>Token → 1Password: <b>Infrastructure → BetterStack → credential</b>.</li>
+<li>Ingest URL → ops repo <code>cluster-settings.nix</code> → <code>logging.endpoint</code>. Commit, push, then <code>cluster-rebuild</code> on each node.</li>
+<li>Every node now ships its full journal — including all container logs — via Vector. Set up alerts in Better Stack (e.g. on <code>FAILED</code> patterns or log-volume anomalies) and point them at e-mail now, webhooks later (that's the support agent's trigger).</li>
+</ol>
+<div class="box"><b>Why Better Stack, and the exit ramp.</b> Chosen for ease of setup: hosted, OpenTelemetry-native, free tier, built-in alerting/webhooks, and an MCP server AI agents can query. Because shipping goes through Vector (vendor-neutral), migrating later to self-hosted Loki or ClickStack is: stand up the backend → change <code>logging.endpoint</code> → swap the 1Password credential. Dashboards and alert rules are what you'd recreate.</div>
+
+<div class="pagebreak"></div>
+<h2>10. Step 8 — Validate every node</h2>
+<p>Run on each node before trusting it with real workloads:</p>
+<table>
+<tr><th>Check</th><th>Command</th><th>Pass looks like</th></tr>
+<tr><td>1Password</td><td><code>op-cluster vault list</code></td><td>Lists the Infrastructure vault</td></tr>
+<tr><td>Tailscale</td><td><code>tailscale status</code></td><td>Node listed with 100.x address; peers visible</td></tr>
+<tr><td>Ceph (if enabled)</td><td><code>mountpoint /mnt/cephfs</code> then write/read a test file</td><td>"is a mountpoint"; file round-trips</td></tr>
+<tr><td>Swarm</td><td><code>docker node ls</code> (managers)</td><td>All nodes Ready, correct roles</td></tr>
+<tr><td>Portainer</td><td>Browser → node detail</td><td>Resources and tasks visible</td></tr>
+<tr><td>Logging</td><td>Better Stack live tail</td><td>This node's journal lines arriving</td></tr>
+<tr><td>Workload</td><td>Deploy a test service via Portainer with a volume on Ceph</td><td>Schedules, starts, persists data</td></tr>
+</table>
+
+<h2>11. Day-2 operations</h2>
+<ul>
+<li><b>Change anything</b> → edit the ops repo, push, <code>cluster-rebuild</code> on affected nodes. Manual hotfixes on a node must be backported to the repo — an unmerged fix is debt.</li>
+<li><b>Per-node software</b> (GPU drivers, an accelerator card, a one-off service) → create <code>hosts/nodeXX/extra.nix</code> in the ops repo. It's auto-imported; shared modules stay untouched.</li>
+<li><b>Roll back a bad change</b> → <code>nixos-rebuild switch --rollback</code> on the node returns to the previous generation; then fix the repo.</li>
+<li><b>Decommission a node</b> → drain in Portainer, <code>docker node rm</code>, remove from Tailscale admin, <b>revoke its 1Password service-account token if compromised</b>.</li>
+<li><b>Support agent (planned)</b> → each node will run a static-binary AI agent (spec: github.com/SEBK4C/Nix-Support-Agent). You'll open an issue in the ops repo labeled <code>node/node07</code> ("install ROCm"), and the node's agent diagnoses, implements via PR, and reports back. Better Stack alert webhooks trigger it automatically for incidents.</li>
+<li><b>Keep current</b> → periodically <code>nix flake update</code> in the ops repo (updates NixOS packages), test with <code>cluster-rebuild test</code> on one worker before rolling out.</li>
+</ul>
+
+<h2>12. Scaling to Dev / Staging / Production</h2>
+<p>The whole design is parameterized by <b>vault name</b>. To run multiple environments:</p>
+<ol class="steps">
+<li>Create one vault per environment: <code>Infra-Dev</code>, <code>Infra-Staging</code>, <code>Infra-Prod</code> — each containing the <b>same item names</b> from Section 3.2 (different credential values: separate tailnets or ACL-segmented tags, separate Better Stack sources, etc.).</li>
+<li>Create one service account per environment, each granted read access to <b>exactly its own vault</b> (<code>nixos-cluster-dev</code> → <code>Infra-Dev</code> only). Store each token in the Admin vault.</li>
+<li>In each environment's ops repo (or branch), set <code>cluster.vault = "Infra-Dev";</code> in <code>cluster-settings.nix</code>. That single line selects the environment — every <code>op://</code> reference follows it.</li>
+<li>Blast-radius rule: a compromised dev node can never read staging or production secrets, because its token simply has no grant there.</li>
+</ol>
+
+<h2>13. Troubleshooting</h2>
+<table>
+<tr><th>Symptom</th><th>Where to look</th><th>Usual cause</th></tr>
+<tr><td>1Password auth fails</td><td><code>journalctl -u op-bootstrap</code></td><td>Token expired/typo'd in <code>/etc/op/token</code>; service account lacks vault grant; system clock skew (check <code>chronyc tracking</code>)</td></tr>
+<tr><td>Secret not found</td><td>Same</td><td>Item or field name doesn't match Section 3.2 exactly (spaces, capitalization)</td></tr>
+<tr><td>Tailnet join fails</td><td><code>journalctl -u tailscale-join</code></td><td>Auth key expired or not <i>pre-approved</i>; ACL policy blocks the node</td></tr>
+<tr><td>Ceph mount fails</td><td><code>journalctl -u mnt-cephfs.mount</code></td><td>MON addresses wrong in settings; key in 1Password isn't the bare base64 secret</td></tr>
+<tr><td>Swarm join fails</td><td><code>journalctl -u swarm-join</code></td><td>Tokens not yet stored in 1Password (Step 5); manager unreachable over tailnet</td></tr>
+<tr><td>Node missing in Portainer</td><td><code>docker service ps portainer_agent</code></td><td>Agent task not scheduled on that node; check node is Ready</td></tr>
+<tr><td>No logs in Better Stack</td><td><code>journalctl -u vector -u logging-secret</code></td><td>Endpoint not set; token missing/wrong in 1Password</td></tr>
+<tr><td>Private repo fetch fails</td><td>Error from <code>nixos-rebuild</code></td><td>GitHub PAT expired or lacks <i>Contents: Read</i> on the ops repo</td></tr>
+</table>
+
+<div class="pagebreak"></div>
+<h2>14. Appendix A — Complete credential inventory</h2>
+<p>Everything secret in the entire system, in one table. If it's not listed here, it should not exist.</p>
+<table>
+<tr><th>#</th><th>Credential</th><th>Lives in</th><th>Created at</th><th>Scope / notes</th></tr>
+<tr><td>1</td><td>1Password service-account token (<code>ops_…</code>)</td><td>Admin vault (master) + <code>/etc/op/token</code> on each node</td><td>my.1password.com → Developer → Service Accounts</td><td>Read-only on Infrastructure vault. One per environment. The only secret ever placed by hand.</td></tr>
+<tr><td>2</td><td>Tailscale auth key (<code>tskey-auth-…</code>)</td><td>Infrastructure → Tailscale → credential</td><td>login.tailscale.com/admin/settings/keys</td><td>Reusable, pre-approved, 90-day expiry. Only needed when nodes join.</td></tr>
+<tr><td>3</td><td>CephFS client key</td><td>Infrastructure → Ceph → credential</td><td><code>ceph auth get-key client.swarm</code> on the Ceph cluster</td><td>Bare base64 secret. Client mount access only.</td></tr>
+<tr><td>4</td><td>Swarm manager join token</td><td>Infrastructure → Swarm → manager-token</td><td>node01 journal after first boot</td><td>Joins managers (nodes 01–03)</td></tr>
+<tr><td>5</td><td>Swarm worker join token</td><td>Infrastructure → Swarm → worker-token</td><td>Same</td><td>Joins workers (nodes 04–10)</td></tr>
+<tr><td>6</td><td>Better Stack source token</td><td>Infrastructure → BetterStack → credential</td><td>telemetry.betterstack.com → Sources</td><td>Log ingestion only</td></tr>
+<tr><td>7</td><td>GitHub read-only PAT</td><td>Infrastructure → GitHub → credential</td><td>github.com/settings/personal-access-tokens/new</td><td>Fine-grained; Contents: Read on the private ops repo only. Used by <code>cluster-rebuild</code>.</td></tr>
+<tr><td>8</td><td>Agent GitHub PAT (read-write)</td><td>Infrastructure → SupportAgent → github-token</td><td>Same URL</td><td>Ops repo: contents/issues/PRs. Framework repo: contents/PRs. No admin scopes.</td></tr>
+<tr><td>9</td><td>LLM API key</td><td>Infrastructure → SupportAgent → llm-api-key</td><td>console.anthropic.com/settings/keys or platform.openai.com/api-keys</td><td>Support agent's model access</td></tr>
+<tr><td>10</td><td>Webhook shared secret</td><td>Infrastructure → SupportAgent → webhook-secret</td><td><code>openssl rand -hex 32</code></td><td>Authenticates Better Stack → agent webhooks</td></tr>
+<tr><td>11</td><td>Better Stack API token</td><td>Infrastructure → SupportAgent → betterstack-api-token</td><td>Better Stack settings → API tokens</td><td>Agent's log-query access (MCP)</td></tr>
+<tr><td>12</td><td>Portainer admin password</td><td>Admin vault → Portainer Admin</td><td>You, at first login (https://node01:9443)</td><td>Human use only; never fetched by nodes</td></tr>
+<tr><td>13</td><td>Account logins + recovery codes (GitHub, Tailscale, Better Stack, 1Password, LLM provider)</td><td>Admin vault</td><td>Each provider</td><td>Break-glass. Enable 2FA/passkeys everywhere.</td></tr>
+</table>
+
+<p class="meta" style="margin-top:24px">Generated for the NixOS Swarm Cluster project · framework: github.com/SEBK4C/NixOS · cluster spec: prompt.md · agent spec: github.com/SEBK4C/Nix-Support-Agent</p>
+
+</body>
+</html>
